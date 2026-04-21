@@ -69,7 +69,32 @@ forge test -v
 
 30 tests covering: oracle publishing, deviation checks, staleness, history, fund metadata, subscriptions at oracle NAV, redemptions, transfer restrictions, share valuation, pause/unpause, full lifecycle scenarios, regulatory freeze, KYC revocation.
 
-## Deploy (Sepolia)
+## Live Deployment (Sepolia)
+
+All contracts are deployed and **verified** on Sepolia testnet:
+
+| Contract | Address | Etherscan |
+|----------|---------|-----------|
+| WhitelistManager | `0x5301118e505FE55d4966449320EbE4E6c67e2B7F` | [View](https://sepolia.etherscan.io/address/0x5301118e505FE55d4966449320EbE4E6c67e2B7F#code) |
+| NAVOracle | `0xbeDE0b420d8a91c4fFea8df830652C2C591545E4` | [View](https://sepolia.etherscan.io/address/0xbeDE0b420d8a91c4fFea8df830652C2C591545E4#code) |
+| PermissionedFundToken | `0x19A7E8bf5722d59A2B6f723AA3b0D03518707c0a` | [View](https://sepolia.etherscan.io/address/0x19A7E8bf5722d59A2B6f723AA3b0D03518707c0a#code) |
+
+### On-chain Activity
+
+Live transactions demonstrating the full fund lifecycle:
+
+| Step | Transaction | Description |
+|------|-------------|-------------|
+| KYC onboarding | [`0xa2772...`](https://sepolia.etherscan.io/tx/0xa27720007f2fb83e38ea568751d0db3a3f310cb6ed5adf6e54f9e496f81cfaa3) | Batch whitelist 2 institutional investors |
+| Subscription | [`0x48f5a...`](https://sepolia.etherscan.io/tx/0x48f5aa6bf4423246e8fd133e77f28e56ef5557dab4e87440b9672e0a0e23363f) | 500 shares minted at NAV 167.34 EUR |
+| Subscription | [`0xb7fa3...`](https://sepolia.etherscan.io/tx/0xb7fa32adea92beec4426551e63dc11ebf459f85a4787796cbfa2d9c96d7ff25f) | 200 shares to investor A |
+| Subscription | [`0x93883...`](https://sepolia.etherscan.io/tx/0x938833126270cadc684d3a7676c6b60a1af82c6f980907fa5a75aefe4edf62a5) | 100 shares to investor B |
+| Redemption | [`0x97635...`](https://sepolia.etherscan.io/tx/0x97635d8abc49e1b22dbc4b6d1921fb43d6006c93cbf3b613fc94e587a1b382aa) | 50 shares burned (partial redemption) |
+| Secondary market | [`0x7d43c...`](https://sepolia.etherscan.io/tx/0x7d43c355d10eee45d9d897e3dace126e846f7aa76c30276f9068be016b467921) | 30 shares transferred between whitelisted investors |
+
+**Current state:** 750 tMMF-EUR shares in circulation across 3 whitelisted addresses.
+
+### Deploy Your Own
 
 ```bash
 cp .env.example .env  # add PRIVATE_KEY, RPC_URL, ETHERSCAN_API_KEY
