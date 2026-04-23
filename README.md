@@ -9,11 +9,12 @@ In February 2026, BNP Paribas Asset Management [issued tokenized shares](https:/
 ## Architecture
 
 ```
-NAVOracle (Chainlink AggregatorV3Interface)
+NAVOracle (Chainlink AggregatorV3Interface, 8 decimals)
 ├── PUBLISHER_ROLE can push daily NAV
 ├── deviation check (max 1% per update)
-├── staleness detection
-├── full round history
+├── minimum update interval (12h default)
+├── full round history (capped at 1000)
+├── emergencyPublishNAV(nav, reason) — admin override with on-chain audit trail
 └── consumed by PermissionedFundToken
 
 WhitelistManager
@@ -22,12 +23,13 @@ WhitelistManager
 └── addInvestorsBatch()
 
 PermissionedFundToken (tMMF-EUR)
-├── reads NAV from oracle on every subscribe/redeem
-├── subscribe() → mint to whitelisted investor at oracle NAV
-├── redeem() → burn shares at oracle NAV
-├── shareValueInCurrency() → portfolio valuation from live oracle
-├── pause() / unpause() → regulatory freeze
-└── _update() → enforces whitelist on every transfer
+├── reads NAV from oracle on every subscribe/redeem (staleness-checked)
+├── subscribe() → mint to whitelisted investor at fresh oracle NAV
+├── redeem() → burn shares at fresh oracle NAV
+├── shareValueInCurrency() → portfolio valuation, scaled by oracle decimals
+├── pause() / unpause() → regulatory freeze (halts BOTH primary and secondary)
+├── forceRedeem() → admin-only, bypasses pause/staleness for KYC revocation
+└── _update() → enforces whitelist + pause on every transfer
 ```
 
 ## Fund Reference Data
@@ -40,17 +42,20 @@ PermissionedFundToken (tMMF-EUR)
 | Currency | EUR |
 | Domicile | Luxembourg |
 | Manager | BNP Paribas Asset Management |
-| NAV (init) | 167.34 EUR/share |
+| NAV (init) | 167.34 EUR/share (on-chain: `16_734_00000000`, scaled 10⁸) |
+| Oracle decimals | 8 (Chainlink fiat-feed convention) |
 | Type | Standard VNAV Money Market Fund (EU 2017/1131) |
 
 ## NAV Oracle
 
-The NAV oracle implements Chainlink's `AggregatorV3Interface`, making it compatible with any protocol that reads Chainlink price feeds. Features:
+The NAV oracle implements Chainlink's `AggregatorV3Interface` with 8 decimals (standard for fiat-denominated feeds), making it compatible with any protocol that reads Chainlink price feeds.
 
 - **Deviation threshold** — rejects NAV updates that deviate more than 1% from the previous value (circuit breaker for erroneous feeds)
 - **Minimum update interval** — prevents duplicate updates within the same period (12h default)
-- **Staleness detection** — `isStale(maxAge)` flags when the oracle hasn't been updated
-- **Full history** — `navHistory(fromRound, toRound)` returns all past NAVs with timestamps
+- **Staleness detection** — `isStale(maxAge)` flags when the oracle hasn't been updated; the token enforces `maxNavAge` on every read
+- **Emergency override** — `emergencyPublishNAV(nav, reason)` lets DEFAULT_ADMIN_ROLE bypass the deviation circuit breaker in extreme market events (ECB shock, correction of a mispublished NAV), with the reason emitted on-chain for audit trail
+- **Full history** — `navHistory(fromRound, toRound)` returns past NAVs with timestamps, capped at 1000 rounds per query
+- **Atomic rounds** — each publish closes a round in a single tx, so `answeredInRound == roundId` by design
 - **Multiple publishers** — separate `PUBLISHER_ROLE` allows dedicated NAV feed infrastructure
 
 ## Stack
@@ -64,40 +69,58 @@ The NAV oracle implements Chainlink's `AggregatorV3Interface`, making it compati
 
 ```bash
 forge build
-forge test -v
+forge test -vv
 ```
 
-30 tests covering: oracle publishing, deviation checks, staleness, history, fund metadata, subscriptions at oracle NAV, redemptions, transfer restrictions, share valuation, pause/unpause, full lifecycle scenarios, regulatory freeze, KYC revocation.
+**46 tests**, all passing, covering: oracle publishing, deviation checks, emergency override, staleness detection in subscribe/redeem/valuation, fund metadata, transfer restrictions, pause blocking both primary and secondary, forced redemption for KYC revocation, full lifecycle scenarios, and constructor input validation.
+
+## Security Audit
+
+An internal audit was performed on the initial implementation. All High and Medium findings have been remediated:
+
+| Finding | Severity | Status |
+|---------|----------|--------|
+| NAV decimals/value inconsistency (167.34 vs 10⁴ scale) | 🔴 High | ✅ Fixed — migrated to Chainlink 10⁸ convention |
+| Oracle staleness not enforced in subscribe/redeem | 🔴 High | ✅ Fixed — `_freshNAV()` helper with `maxNavAge` |
+| `pause()` did not halt secondary market transfers | 🔴 High | ✅ Fixed — `_update` now reverts on `paused()` |
+| Circuit breaker with no emergency override | 🟠 Medium | ✅ Fixed — `emergencyPublishNAV(nav, reason)` |
+| Constructor did not validate `initialNav > 0` | 🟠 Medium | ✅ Fixed |
+| `answeredInRound` semantics | 🟠 Medium | ✅ Documented — rounds are atomic by design |
+| Deployer received all operational roles | 🟠 Medium | ✅ Fixed — Deploy script supports role separation via env vars |
+
+The fixes are covered by 7 new tests (staleness reverts, pause-blocks-transfer, emergency override, force redeem, constructor validation).
 
 ## Live Deployment (Sepolia)
 
-All contracts are deployed and **verified** on Sepolia testnet:
+All contracts are deployed and **verified** on Sepolia testnet (post-audit, with fixes applied):
 
 | Contract | Address | Etherscan |
 |----------|---------|-----------|
-| WhitelistManager | `0x5301118e505FE55d4966449320EbE4E6c67e2B7F` | [View](https://sepolia.etherscan.io/address/0x5301118e505FE55d4966449320EbE4E6c67e2B7F#code) |
-| NAVOracle | `0xbeDE0b420d8a91c4fFea8df830652C2C591545E4` | [View](https://sepolia.etherscan.io/address/0xbeDE0b420d8a91c4fFea8df830652C2C591545E4#code) |
-| PermissionedFundToken | `0x19A7E8bf5722d59A2B6f723AA3b0D03518707c0a` | [View](https://sepolia.etherscan.io/address/0x19A7E8bf5722d59A2B6f723AA3b0D03518707c0a#code) |
+| WhitelistManager | `0x595963c4A512742a67635c61bdbD68219CDCf87b` | [View](https://sepolia.etherscan.io/address/0x595963c4A512742a67635c61bdbD68219CDCf87b#code) |
+| NAVOracle | `0x7D28829d9dd497362B240A5B5Cae46473370B2CA` | [View](https://sepolia.etherscan.io/address/0x7D28829d9dd497362B240A5B5Cae46473370B2CA#code) |
+| PermissionedFundToken | `0xcCfEeF4C17d5639e9ABcAeEef0A0A16BCdd43C6d` | [View](https://sepolia.etherscan.io/address/0xcCfEeF4C17d5639e9ABcAeEef0A0A16BCdd43C6d#code) |
 
-### On-chain Activity
+### Admin — Gnosis Safe (2-of-3 multisig)
 
-Live transactions demonstrating the full fund lifecycle:
+`DEFAULT_ADMIN_ROLE` on every contract is held by a Safe smart-contract wallet on Sepolia, **not** by an EOA. This mirrors the institutional pattern used by production tokenized funds (BlackRock BUIDL, Franklin Templeton FOBXX): critical admin actions (role grants, emergency NAV publish, forced redemption) require multi-party approval.
 
-| Step | Transaction | Description |
-|------|-------------|-------------|
-| KYC onboarding | [`0xa2772...`](https://sepolia.etherscan.io/tx/0xa27720007f2fb83e38ea568751d0db3a3f310cb6ed5adf6e54f9e496f81cfaa3) | Batch whitelist 2 institutional investors |
-| Subscription | [`0x48f5a...`](https://sepolia.etherscan.io/tx/0x48f5aa6bf4423246e8fd133e77f28e56ef5557dab4e87440b9672e0a0e23363f) | 500 shares minted at NAV 167.34 EUR |
-| Subscription | [`0xb7fa3...`](https://sepolia.etherscan.io/tx/0xb7fa32adea92beec4426551e63dc11ebf459f85a4787796cbfa2d9c96d7ff25f) | 200 shares to investor A |
-| Subscription | [`0x93883...`](https://sepolia.etherscan.io/tx/0x938833126270cadc684d3a7676c6b60a1af82c6f980907fa5a75aefe4edf62a5) | 100 shares to investor B |
-| Redemption | [`0x97635...`](https://sepolia.etherscan.io/tx/0x97635d8abc49e1b22dbc4b6d1921fb43d6006c93cbf3b613fc94e587a1b382aa) | 50 shares burned (partial redemption) |
-| Secondary market | [`0x7d43c...`](https://sepolia.etherscan.io/tx/0x7d43c355d10eee45d9d897e3dace126e846f7aa76c30276f9068be016b467921) | 30 shares transferred between whitelisted investors |
+| Role | Holder | Safe Explorer |
+|------|--------|---------------|
+| `DEFAULT_ADMIN_ROLE` + all operational roles | `0x3ee78467ceDf4a724a7A2B4B55344c79117b0Ff0` | [View Safe](https://app.safe.global/home?safe=sep:0x3ee78467ceDf4a724a7A2B4B55344c79117b0Ff0) |
 
-**Current state:** 750 tMMF-EUR shares in circulation across 3 whitelisted addresses.
+The deployer EOA renounces every role at the end of the deployment script — it holds no residual privilege on-chain.
 
 ### Deploy Your Own
 
 ```bash
 cp .env.example .env  # add PRIVATE_KEY, RPC_URL, ETHERSCAN_API_KEY
+
+# Optional: separate operational roles (falls back to deployer if unset)
+# export ADMIN_ADDRESS=0x...         # multisig recommended in production
+# export COMPLIANCE_OFFICER=0x...
+# export NAV_PUBLISHER=0x...
+# export FUND_MANAGER=0x...
+
 source .env
 forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --verify
 ```
@@ -106,12 +129,23 @@ forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --verify
 
 | Decision | Rationale |
 |----------|-----------|
-| Chainlink AggregatorV3Interface | Industry standard — any DeFi protocol can consume the NAV feed |
+| Chainlink AggregatorV3Interface, 8 decimals | Industry standard for fiat feeds — any DeFi protocol can consume the NAV feed |
 | NAV deviation circuit breaker | Money market funds move basis points per day, not percent — large jumps signal errors |
+| Emergency NAV override with on-chain reason | Real funds face extreme events (ECB decisions, market shocks); a pure circuit breaker without override freezes the oracle |
 | Oracle separate from token | Separation of concerns: NAV infrastructure ≠ token logic. Mirrors real setup where NAV is computed by fund admin, not the transfer agent |
-| Staleness check | Critical for institutional use — stale NAV means stale valuations |
+| Staleness check enforced in the token | Critical for institutional use — stale NAV means stale valuations. `maxNavAge` is a constructor param (48h default, weekend-safe) |
+| Pause halts secondary market too | A regulatory freeze must stop all mouvement, not just primary |
+| `forceRedeem` bypasses pause and staleness | Guarantees investors can always get funds back even during a freeze or oracle outage — restricted to admin |
 | Real ISIN on-chain | Links the token to a regulated, identifiable financial product |
+| Role separation at deploy | Production should split DEFAULT_ADMIN / COMPLIANCE / PUBLISHER / FUND_MANAGER across a multisig + dedicated keys |
 | Permissioned on public chain | Mirrors BNP's approach: Ethereum infra + whitelist for compliance |
+
+## Known Limitations (PoC scope)
+
+- **Off-chain cash settlement** — `subscribe(investor, shares)` mints a fixed number of shares decided by the fund manager; the euro payment is assumed to occur off-chain through the custodian. A production system would take `cashAmount` and compute `shares = cashAmount * 10^decimals / NAV`.
+- **Single-key admin** in the default deploy — the deployer receives `DEFAULT_ADMIN_ROLE` plus all operational roles. In production, `ADMIN_ADDRESS` should be a Gnosis Safe, and the operational roles split across dedicated keys (see env vars above).
+- **NAV publisher is trusted** — no oracle decentralization (no signature aggregation, no multi-source median). The PoC focuses on the on-chain contract design, not on NAV sourcing.
+- **No fee model, no dividends, no redemption queuing** — typical features of a production tokenized fund are out of scope.
 
 ## Author
 

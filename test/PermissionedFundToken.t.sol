@@ -16,16 +16,22 @@ contract PermissionedFundTokenTest is Test {
     address bob = makeAddr("bob");
     address charlie = makeAddr("charlie");
 
+    int256 constant NAV_167_34 = 16_734_00000000;
+    int256 constant NAV_167_50 = 16_750_00000000;
+
+    uint256 constant MAX_NAV_AGE = 48 hours;
+
     function setUp() public {
         vm.startPrank(admin);
         whitelist = new WhitelistManager(admin);
-        oracle = new NAVOracle(admin, "LU0083138064", 16734, 12 hours, 100);
+        oracle = new NAVOracle(admin, "LU0083138064", NAV_167_34, 12 hours, 100);
         token = new PermissionedFundToken(
             "BNP Paribas Euro Money Market - Tokenized",
             "tMMF-EUR",
             admin,
             address(whitelist),
             address(oracle),
+            MAX_NAV_AGE,
             PermissionedFundToken.FundMetadata({
                 isin: "LU0083138064",
                 currency: "EUR",
@@ -43,11 +49,12 @@ contract PermissionedFundTokenTest is Test {
         assertEq(token.symbol(), "tMMF-EUR");
         assertEq(keccak256(bytes(token.isin())), keccak256("LU0083138064"));
         assertEq(keccak256(bytes(token.fundCurrency())), keccak256("EUR"));
+        assertEq(token.maxNavAge(), MAX_NAV_AGE);
     }
 
     function test_latestNAV() public view {
         (int256 nav, uint256 updatedAt) = token.latestNAV();
-        assertEq(nav, 16734);
+        assertEq(nav, NAV_167_34);
         assertGt(updatedAt, 0);
     }
 
@@ -70,6 +77,13 @@ contract PermissionedFundTokenTest is Test {
         token.subscribe(alice, 1e18);
     }
 
+    function test_subscribe_revertIfStaleNAV() public {
+        vm.warp(block.timestamp + MAX_NAV_AGE + 1);
+        vm.prank(admin);
+        vm.expectRevert("Stale NAV");
+        token.subscribe(alice, 1e18);
+    }
+
     function test_redeem() public {
         vm.startPrank(admin);
         token.subscribe(alice, 10e18);
@@ -85,6 +99,15 @@ contract PermissionedFundTokenTest is Test {
         vm.expectRevert("Insufficient shares");
         token.redeem(alice, 2e18);
         vm.stopPrank();
+    }
+
+    function test_redeem_revertIfStaleNAV() public {
+        vm.prank(admin);
+        token.subscribe(alice, 5e18);
+        vm.warp(block.timestamp + MAX_NAV_AGE + 1);
+        vm.prank(admin);
+        vm.expectRevert("Stale NAV");
+        token.redeem(alice, 1e18);
     }
 
     function test_transfer_betweenWhitelisted() public {
@@ -122,19 +145,27 @@ contract PermissionedFundTokenTest is Test {
         vm.prank(admin);
         token.subscribe(alice, 10e18);
 
+        // 10 shares × 167.34 EUR = 1673.40 EUR → scaled by 10^8 = 167_340_00000000
         uint256 value = token.shareValueInCurrency(alice);
-        assertEq(value, 16734 * 10);
+        assertEq(value, uint256(NAV_167_34) * 10);
+    }
+
+    function test_shareValue_revertIfStaleNAV() public {
+        vm.prank(admin);
+        token.subscribe(alice, 5e18);
+        vm.warp(block.timestamp + MAX_NAV_AGE + 1);
+        vm.expectRevert("Stale NAV");
+        token.shareValueInCurrency(alice);
     }
 
     function test_subscriptionEmitsOracleNAV() public {
-        // Update oracle NAV
         vm.warp(block.timestamp + 13 hours);
         vm.prank(admin);
-        oracle.publishNAV(16750);
+        oracle.publishNAV(NAV_167_50);
 
         vm.prank(admin);
         vm.expectEmit(true, false, false, true);
-        emit PermissionedFundToken.Subscription(alice, 10e18, 16750);
+        emit PermissionedFundToken.Subscription(alice, 10e18, NAV_167_50);
         token.subscribe(alice, 10e18);
     }
 
@@ -146,6 +177,18 @@ contract PermissionedFundTokenTest is Test {
         vm.stopPrank();
     }
 
+    function test_pause_blocksSecondaryTransfers() public {
+        vm.prank(admin);
+        token.subscribe(alice, 5e18);
+
+        vm.prank(admin);
+        token.pause();
+
+        vm.prank(alice);
+        vm.expectRevert("Transfers paused");
+        token.transfer(bob, 1e18);
+    }
+
     function test_unpause_resumesOperations() public {
         vm.startPrank(admin);
         token.pause();
@@ -153,5 +196,35 @@ contract PermissionedFundTokenTest is Test {
         token.subscribe(alice, 1e18);
         vm.stopPrank();
         assertEq(token.balanceOf(alice), 1e18);
+    }
+
+    function test_forceRedeem_bypassesPauseAndStaleness() public {
+        vm.prank(admin);
+        token.subscribe(alice, 10e18);
+
+        vm.prank(admin);
+        token.pause();
+        vm.warp(block.timestamp + MAX_NAV_AGE + 1);
+
+        vm.prank(admin);
+        token.forceRedeem(alice, 10e18);
+        assertEq(token.balanceOf(alice), 0);
+    }
+
+    function test_forceRedeem_revertIfNotAdmin() public {
+        vm.prank(admin);
+        token.subscribe(alice, 5e18);
+
+        vm.prank(alice);
+        vm.expectRevert();
+        token.forceRedeem(alice, 1e18);
+    }
+
+    function test_constructor_revertZeroMaxNavAge() public {
+        vm.expectRevert("Zero maxNavAge");
+        new PermissionedFundToken(
+            "X", "X", admin, address(whitelist), address(oracle), 0,
+            PermissionedFundToken.FundMetadata("", "", "", "")
+        );
     }
 }

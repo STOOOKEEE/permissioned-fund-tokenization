@@ -4,6 +4,11 @@ pragma solidity ^0.8.24;
 import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
+/// @title NAVOracle
+/// @notice Chainlink-compatible NAV feed for tokenized money market fund shares.
+/// @dev Uses 8 decimals (Chainlink convention for fiat-denominated feeds).
+///      Rounds are atomic: each publishNAV() closes a round in one tx,
+///      so answeredInRound == roundId always (no open rounds).
 contract NAVOracle is AggregatorV3Interface, AccessControl {
     bytes32 public constant PUBLISHER_ROLE = keccak256("PUBLISHER_ROLE");
 
@@ -14,15 +19,17 @@ contract NAVOracle is AggregatorV3Interface, AccessControl {
     }
 
     string private _isin;
-    uint8 private constant DECIMALS = 4; // 16734 = 167.34 EUR
+    uint8 private constant DECIMALS = 8; // Chainlink fiat-feed convention: 16734_00000000 = 167.34 EUR
     uint80 private _latestRoundId;
     mapping(uint80 => Round) private _rounds;
 
     uint256 public minUpdateInterval;
-    uint256 public maxNavDeviation; // max % change per update (basis points, 100 = 1%)
+    uint256 public maxNavDeviation; // basis points, 100 = 1%
+
+    uint256 public constant MAX_HISTORY_RANGE = 1000;
 
     event NAVPublished(uint80 indexed roundId, int256 nav, uint256 timestamp);
-    event StaleNAVAlert(uint80 roundId, uint256 secondsSinceUpdate);
+    event EmergencyNAVPublished(uint80 indexed roundId, int256 nav, string reason);
 
     constructor(
         address admin,
@@ -31,6 +38,9 @@ contract NAVOracle is AggregatorV3Interface, AccessControl {
         uint256 _minUpdateInterval,
         uint256 _maxNavDeviation
     ) {
+        require(admin != address(0), "Zero admin");
+        require(initialNav > 0, "Initial NAV must be positive");
+
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PUBLISHER_ROLE, admin);
         _isin = fundIsin;
@@ -46,6 +56,8 @@ contract NAVOracle is AggregatorV3Interface, AccessControl {
         emit NAVPublished(1, initialNav, block.timestamp);
     }
 
+    /// @notice Publish a new NAV round under normal conditions.
+    /// @dev Enforces minUpdateInterval cooldown and maxNavDeviation circuit breaker.
     function publishNAV(int256 nav) external onlyRole(PUBLISHER_ROLE) {
         require(nav > 0, "NAV must be positive");
 
@@ -73,6 +85,33 @@ contract NAVOracle is AggregatorV3Interface, AccessControl {
         emit NAVPublished(_latestRoundId, nav, block.timestamp);
     }
 
+    /// @notice Publish a new NAV bypassing the deviation circuit breaker.
+    /// @dev Restricted to DEFAULT_ADMIN_ROLE. Still enforces nav > 0 and cooldown.
+    ///      Reason string is emitted on-chain for audit trail (regulatory event,
+    ///      extraordinary market move, correction of a mispublished NAV).
+    function emergencyPublishNAV(int256 nav, string calldata reason)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(nav > 0, "NAV must be positive");
+        require(bytes(reason).length > 0, "Reason required");
+
+        Round storage prev = _rounds[_latestRoundId];
+        require(
+            block.timestamp >= prev.updatedAt + minUpdateInterval,
+            "Too soon since last update"
+        );
+
+        _latestRoundId++;
+        _rounds[_latestRoundId] = Round({
+            answer: nav,
+            startedAt: block.timestamp,
+            updatedAt: block.timestamp
+        });
+        emit NAVPublished(_latestRoundId, nav, block.timestamp);
+        emit EmergencyNAVPublished(_latestRoundId, nav, reason);
+    }
+
     function isStale(uint256 maxAge) external view returns (bool) {
         return block.timestamp > _rounds[_latestRoundId].updatedAt + maxAge;
     }
@@ -84,6 +123,7 @@ contract NAVOracle is AggregatorV3Interface, AccessControl {
     {
         require(fromRound >= 1 && toRound <= _latestRoundId && fromRound <= toRound, "Invalid range");
         uint256 length = toRound - fromRound + 1;
+        require(length <= MAX_HISTORY_RANGE, "Range too large");
         navs = new int256[](length);
         timestamps = new uint256[](length);
         for (uint256 i = 0; i < length; i++) {
@@ -115,6 +155,7 @@ contract NAVOracle is AggregatorV3Interface, AccessControl {
     {
         require(_roundId > 0 && _roundId <= _latestRoundId, "Round not found");
         Round storage r = _rounds[_roundId];
+        // answeredInRound == roundId: rounds are atomic (no open/unanswered rounds).
         return (_roundId, r.answer, r.startedAt, r.updatedAt, _roundId);
     }
 
