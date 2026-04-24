@@ -110,6 +110,32 @@ All contracts are deployed and **verified** on Sepolia testnet (post-audit, with
 
 The deployer EOA renounces every role at the end of the deployment script — it holds no residual privilege on-chain.
 
+### On-chain Activity
+
+Full fund lifecycle demonstrated on Sepolia — KYC onboarding + 3 subscriptions + 1 redemption batched in a single Safe multisig transaction, followed by a secondary-market transfer from one whitelisted investor to another.
+
+| Step | Transaction | Description |
+|------|-------------|-------------|
+| Safe batch | [`0x97f07025…`](https://sepolia.etherscan.io/tx/0x97f07025e6a20b046ebc4c480cc8213548821a838eb16366d7ffaf9908d87669) | Atomic batch via Gnosis Safe: whitelist 2 investors, subscribe 500 + 200 + 100 shares, redeem 50 shares — 6 logical actions in 1 on-chain tx |
+| Secondary transfer | [`0x8a6391b7…`](https://sepolia.etherscan.io/tx/0x8a6391b727357d09aaa34ceb75af6c39acefc06b15c145a4b5075e16edb1b3b7) | Investor A sends 100 tMMF-EUR directly to Investor B (ERC20 transfer, enforced against whitelist on-chain) |
+
+**Investor addresses (whitelisted on Sepolia)**
+
+| Label | Address |
+|-------|---------|
+| Investor A | `0x9b7c1d447987A2F50895cf60CEA0483C4fC19eB6` |
+| Investor B | `0x23Aa37Acb961608E2C59687354d867d24f73EE4a` |
+
+**Current state (block 10,719,557+)**
+
+| Metric | Value |
+|--------|-------|
+| Total supply | 750 tMMF-EUR |
+| Investor A balance | 550 tMMF-EUR |
+| Investor B balance | 200 tMMF-EUR |
+| Total subscriptions | 800 tMMF-EUR |
+| Total redemptions | 50 tMMF-EUR |
+
 ### Deploy Your Own
 
 ```bash
