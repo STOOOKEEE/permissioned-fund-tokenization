@@ -10,11 +10,14 @@ In February 2026, BNP Paribas Asset Management [issued tokenized shares](https:/
 
 ```
 NAVOracle (Chainlink AggregatorV3Interface, 8 decimals)
-├── PUBLISHER_ROLE can push daily NAV
-├── deviation check (max 1% per update)
-├── minimum update interval (12h default)
+├── PUBLISHER_ROLE → publishNAV() under normal operation
+│   ├── 1% max deviation per update (circuit breaker)
+│   └── 12h minimum update interval
+├── DEFAULT_ADMIN_ROLE → emergencyPublishNAV(nav, reason)
+│   ├── bypasses the 1% deviation cap for extreme market events
+│   ├── requires a non-empty reason emitted on-chain (audit trail)
+│   └── still enforces the 12h cooldown (anti-spam)
 ├── full round history (capped at 1000)
-├── emergencyPublishNAV(nav, reason) — admin override with on-chain audit trail
 └── consumed by PermissionedFundToken
 
 WhitelistManager
@@ -50,10 +53,10 @@ PermissionedFundToken (tMMF-EUR)
 
 The NAV oracle implements Chainlink's `AggregatorV3Interface` with 8 decimals (standard for fiat-denominated feeds), making it compatible with any protocol that reads Chainlink price feeds.
 
-- **Deviation threshold** — rejects NAV updates that deviate more than 1% from the previous value (circuit breaker for erroneous feeds)
-- **Minimum update interval** — prevents duplicate updates within the same period (12h default)
+- **Deviation threshold** — `publishNAV()` rejects updates that deviate more than 1% from the previous value. This catches erroneous feeds under normal operation; a legitimate move above 1% (crisis event, rate shock, correction of a mispublished NAV) is handled via the emergency override below, not by freezing the oracle.
+- **Emergency override** — `emergencyPublishNAV(nav, reason)` lets DEFAULT_ADMIN_ROLE (the Gnosis Safe) bypass the 1% circuit breaker. Requires a non-empty reason string emitted on-chain in a dedicated `EmergencyNAVPublished` event for audit trail. The 12h cooldown still applies, preventing spam.
+- **Minimum update interval** — 12h cooldown between publishes (default), applied to both normal and emergency paths
 - **Staleness detection** — `isStale(maxAge)` flags when the oracle hasn't been updated; the token enforces `maxNavAge` on every read
-- **Emergency override** — `emergencyPublishNAV(nav, reason)` lets DEFAULT_ADMIN_ROLE bypass the deviation circuit breaker in extreme market events (ECB shock, correction of a mispublished NAV), with the reason emitted on-chain for audit trail
 - **Full history** — `navHistory(fromRound, toRound)` returns past NAVs with timestamps, capped at 1000 rounds per query
 - **Atomic rounds** — each publish closes a round in a single tx, so `answeredInRound == roundId` by design
 - **Multiple publishers** — separate `PUBLISHER_ROLE` allows dedicated NAV feed infrastructure
